@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -27,10 +28,17 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recurrence, err := recurrenceInputDTOToUsecase(req.RecurrenceSettings)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
 	created, err := h.usecase.Create(r.Context(), taskusecase.CreateInput{
-		Title:       req.Title,
-		Description: req.Description,
-		Status:      req.Status,
+		Title:              req.Title,
+		Description:        req.Description,
+		Status:             req.Status,
+		RecurrenceSettings: recurrence,
 	})
 	if err != nil {
 		writeUsecaseError(w, err)
@@ -69,10 +77,18 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recurrence, err := recurrenceInputDTOToUsecase(req.RecurrenceSettings)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
 	updated, err := h.usecase.Update(r.Context(), id, taskusecase.UpdateInput{
-		Title:       req.Title,
-		Description: req.Description,
-		Status:      req.Status,
+		Title:              req.Title,
+		Description:        req.Description,
+		Status:             req.Status,
+		RecurrenceSettings: recurrence,
+		RemoveRecurrence:   req.RemoveRecurrence,
 	})
 	if err != nil {
 		writeUsecaseError(w, err)
@@ -112,6 +128,50 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (h *TaskHandler) GetOccurrences(w http.ResponseWriter, r *http.Request) {
+	id, err := getIDFromRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	fromStr := r.URL.Query().Get("from")
+	toStr := r.URL.Query().Get("to")
+
+	if fromStr == "" || toStr == "" {
+		writeError(w, http.StatusBadRequest, errors.New("query params 'from' and 'to' are required (format: YYYY-MM-DD)"))
+		return
+	}
+
+	from, err := time.Parse("2006-01-02", fromStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid 'from' date, expected YYYY-MM-DD"))
+		return
+	}
+
+	to, err := time.Parse("2006-01-02", toStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid 'to' date, expected YYYY-MM-DD"))
+		return
+	}
+
+	occurrences, err := h.usecase.GetOccurrences(r.Context(), id, from, to)
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+
+	dates := make([]string, 0, len(occurrences))
+	for _, d := range occurrences {
+		dates = append(dates, d.Format("2006-01-02"))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task_id":     id,
+		"occurrences": dates,
+	})
+}
+
 func getIDFromRequest(r *http.Request) (int64, error) {
 	rawID := mux.Vars(r)["id"]
 	if rawID == "" {
@@ -134,11 +194,7 @@ func decodeJSON(r *http.Request, dst any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 
-	if err := decoder.Decode(dst); err != nil {
-		return err
-	}
-
-	return nil
+	return decoder.Decode(dst)
 }
 
 func writeUsecaseError(w http.ResponseWriter, err error) {
@@ -161,6 +217,5 @@ func writeError(w http.ResponseWriter, status int, err error) {
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-
 	_ = json.NewEncoder(w).Encode(payload)
 }

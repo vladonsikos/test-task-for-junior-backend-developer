@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,12 +27,7 @@ func (r *Repository) Create(ctx context.Context, task *taskdomain.Task) (*taskdo
 	`
 
 	row := r.pool.QueryRow(ctx, query, task.Title, task.Description, task.Status, task.CreatedAt, task.UpdatedAt)
-	created, err := scanTask(row)
-	if err != nil {
-		return nil, err
-	}
-
-	return created, nil
+	return scanTask(row)
 }
 
 func (r *Repository) GetByID(ctx context.Context, id int64) (*taskdomain.Task, error) {
@@ -47,7 +43,6 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (*taskdomain.Task, e
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, taskdomain.ErrNotFound
 		}
-
 		return nil, err
 	}
 
@@ -71,7 +66,6 @@ func (r *Repository) Update(ctx context.Context, task *taskdomain.Task) (*taskdo
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, taskdomain.ErrNotFound
 		}
-
 		return nil, err
 	}
 
@@ -112,7 +106,6 @@ func (r *Repository) List(ctx context.Context) ([]taskdomain.Task, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		tasks = append(tasks, *task)
 	}
 
@@ -121,6 +114,58 @@ func (r *Repository) List(ctx context.Context) ([]taskdomain.Task, error) {
 	}
 
 	return tasks, nil
+}
+
+func (r *Repository) SetRecurrence(ctx context.Context, s *taskdomain.RecurrenceSettings) (*taskdomain.RecurrenceSettings, error) {
+	const query = `
+		INSERT INTO recurrence_settings (task_id, type, interval, day_of_month, dates, parity, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (task_id) DO UPDATE SET
+			type         = EXCLUDED.type,
+			interval     = EXCLUDED.interval,
+			day_of_month = EXCLUDED.day_of_month,
+			dates        = EXCLUDED.dates,
+			parity       = EXCLUDED.parity,
+			updated_at   = EXCLUDED.updated_at
+		RETURNING id, task_id, type, interval, day_of_month, dates, parity, created_at, updated_at
+	`
+
+	var parity *string
+	if s.Parity != nil {
+		p := string(*s.Parity)
+		parity = &p
+	}
+
+	row := r.pool.QueryRow(ctx, query,
+		s.TaskID, string(s.Type), s.Interval, s.DayOfMonth,
+		s.Dates, parity, s.CreatedAt, s.UpdatedAt,
+	)
+
+	return scanRecurrence(row)
+}
+
+func (r *Repository) GetRecurrence(ctx context.Context, taskID int64) (*taskdomain.RecurrenceSettings, error) {
+	const query = `
+		SELECT id, task_id, type, interval, day_of_month, dates, parity, created_at, updated_at
+		FROM recurrence_settings
+		WHERE task_id = $1
+	`
+
+	row := r.pool.QueryRow(ctx, query, taskID)
+	rs, err := scanRecurrence(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rs, nil
+}
+
+func (r *Repository) DeleteRecurrence(ctx context.Context, taskID int64) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM recurrence_settings WHERE task_id = $1`, taskID)
+	return err
 }
 
 type taskScanner interface {
@@ -147,4 +192,40 @@ func scanTask(scanner taskScanner) (*taskdomain.Task, error) {
 	task.Status = taskdomain.Status(status)
 
 	return &task, nil
+}
+
+func scanRecurrence(scanner taskScanner) (*taskdomain.RecurrenceSettings, error) {
+	var (
+		rs        taskdomain.RecurrenceSettings
+		recType   string
+		parityStr *string
+		dates     []time.Time
+	)
+
+	if err := scanner.Scan(
+		&rs.ID,
+		&rs.TaskID,
+		&recType,
+		&rs.Interval,
+		&rs.DayOfMonth,
+		&dates,
+		&parityStr,
+		&rs.CreatedAt,
+		&rs.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+
+	rs.Type = taskdomain.RecurrenceType(recType)
+
+	if parityStr != nil {
+		p := taskdomain.Parity(*parityStr)
+		rs.Parity = &p
+	}
+
+	for _, d := range dates {
+		rs.Dates = append(rs.Dates, d.UTC())
+	}
+
+	return &rs, nil
 }
